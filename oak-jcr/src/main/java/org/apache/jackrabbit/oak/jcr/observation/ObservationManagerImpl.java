@@ -60,13 +60,11 @@ public class ObservationManagerImpl implements ObservationManager {
     private static final Marker DEPRECATED =
             MarkerFactory.getMarker("deprecated");
 
-    private final Map<EventListener, ChangeProcessor> processors =
-            new HashMap<EventListener, ChangeProcessor>();
+    private final ChangeProcessor processor;
 
     private final SessionDelegate sessionDelegate;
     private final ReadOnlyNodeTypeManager ntMgr;
     private final NamePathMapper namePathMapper;
-    private final Whiteboard whiteboard;
 
     /**
      * Create a new instance based on a {@link ContentSession} that needs to implement
@@ -86,20 +84,12 @@ public class ObservationManagerImpl implements ObservationManager {
         this.sessionDelegate = sessionDelegate;
         this.ntMgr = nodeTypeManager;
         this.namePathMapper = namePathMapper;
-        this.whiteboard = whiteboard;
+        this.processor = new ChangeProcessor(sessionDelegate.getContentSession(), namePathMapper);
+        this.processor.start(whiteboard);
     }
 
     public void dispose() {
-        List<ChangeProcessor> toBeStopped;
-
-        synchronized (this) {
-            toBeStopped = newArrayList(processors.values());
-            processors.clear();
-        }
-
-        for (ChangeProcessor processor : toBeStopped) {
-            processor.stop();
-        }
+        processor.stopIt();
     }
 
     @Override
@@ -108,45 +98,36 @@ public class ObservationManagerImpl implements ObservationManager {
         boolean includeExternal = !(listener instanceof ExcludeExternal);
         EventFilter filter = new EventFilter(ntMgr, eventTypes, oakPath(absPath), isDeep,
                 uuid, validateNodeTypeNames(nodeTypeName), !noLocal, includeExternal);
-        ChangeProcessor processor = processors.get(listener);
-        if (processor == null) {
-            log.info(OBSERVATION, "Registering event listener {} with filter {}", listener, filter);
-            ListenerTracker tracker = new ListenerTracker(
-                    listener, eventTypes, absPath, isDeep,
-                    uuid, nodeTypeName, noLocal) {
-                @Override
-                protected void warn(String message) {
-                    log.warn(DEPRECATED, message, initStackTrace);
-                }
-                @Override
-                protected void beforeEventDelivery() {
-                    sessionDelegate.refreshAtNextAccess();
-                }
-            };
-            processor = new ChangeProcessor(
-                    sessionDelegate.getContentSession(), namePathMapper, tracker, filter);
-            processors.put(listener, processor);
-            processor.start(whiteboard);
-        } else {
-            log.debug(OBSERVATION, "Changing event listener {} to filter {}", listener, filter);
-            processor.setFilter(filter);
-        }
+
+        log.info(OBSERVATION, "Registering event listener {} with filter {}", listener, filter);
+        System.out.format("Registering event listener %s with filter %s%n", listener, filter);
+//        ListenerTracker tracker = new ListenerTracker(
+//                listener, eventTypes, absPath, isDeep,
+//                uuid, nodeTypeName, noLocal) {
+//            @Override
+//            protected void warn(String message) {
+//                log.warn(DEPRECATED, message, initStackTrace);
+//            }
+//            @Override
+//            protected void beforeEventDelivery() {
+//                sessionDelegate.refreshAtNextAccess();
+//            }
+//        };
+        processor.addListener(listener, filter);
+
+//        log.debug(OBSERVATION, "Changing event listener {} to filter {}", listener, filter);
+        //processor.setFilter(filter);
     }
 
     @Override
     public void removeEventListener(EventListener listener) {
-        ChangeProcessor processor;
-        synchronized (this) {
-            processor = processors.remove(listener);
-        }
-        if (processor != null) {
-            processor.stop(); // needs to happen outside synchronization
-        }
+        System.out.format("Removing event listener %s%n", listener);
+        processor.removeListener(listener);
     }
 
     @Override
     public EventListenerIterator getRegisteredEventListeners() throws RepositoryException {
-        return new EventListenerIteratorAdapter(processors.keySet());
+        return new EventListenerIteratorAdapter(processor.getListeners());
     }
 
     @Override
