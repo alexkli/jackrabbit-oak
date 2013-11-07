@@ -31,7 +31,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
+import javax.jcr.LoginException;
 import javax.jcr.Node;
 import javax.jcr.Repository;
 import javax.jcr.RepositoryException;
@@ -87,51 +89,17 @@ public class ObservationTest extends Benchmark {
         final AtomicInteger eventCount = new AtomicInteger();
         final AtomicInteger nodeCount = new AtomicInteger();
 
-        EventListener listener = new EventListener() {
-            @Override
-            public void onEvent(EventIterator events) {
-                for (; events.hasNext(); events.nextEvent()) {
-                    eventCount.incrementAndGet();
-                }
-            }
-        };
-
         try {
-            observationManager.addEventListener(listener, EVENT_TYPES, "/", true, null, null, false);
-            Future<?> createNodes = Executors.newSingleThreadExecutor().submit(new Runnable() {
-                private final Session session = repository.login(new SimpleCredentials("admin", "admin".toCharArray()));
+            for (int i=0; i < 50; i++) {
+                observationManager.addEventListener(createListener(eventCount), EVENT_TYPES, "/", true, null, null, false);
+            }
 
-                @Override
-                public void run() {
-                    try {
-                        Node testRoot = session.getRootNode().addNode("observationBenchmark");
-                        createChildren(testRoot, 100);
-                        for (Node m : JcrUtils.getChildNodes(testRoot)) {
-                            createChildren(m, 100);
-                            for (Node n : JcrUtils.getChildNodes(m)) {
-                                createChildren(n, 5);
-                            }
-                        }
-                        session.save();
-                    } catch (RepositoryException e) {
-                        throw new RuntimeException(e);
-                    } finally {
-                        session.logout();
-                    }
-                }
-
-                private void createChildren(Node node, int count) throws RepositoryException {
-                    for (int c = 0; c < count; c++) {
-                        node.addNode("n" + c);
-                        if (nodeCount.incrementAndGet() % SAVE_INTERVAL == 0) {
-                            node.getSession().save();
-                        }
-                    }
-                }
-            });
+            Future<?> createNodes = Executors.newSingleThreadExecutor().submit(getTask(repository, nodeCount, "1"));
+            Future<?> createNodes2 = Executors.newSingleThreadExecutor().submit(getTask(repository, nodeCount, "2"));
+            Future<?> createNodes3 = Executors.newSingleThreadExecutor().submit(getTask(repository, nodeCount, "3"));
 
             System.out.println("ms      #node   nodes/s #event  event/s event ratio");
-            while (!createNodes.isDone() || (eventCount.get() < nodeCount.get() * EVENTS_PER_NODE)) {
+            while (!(createNodes.isDone() && createNodes2.isDone() && createNodes3.isDone()) || (eventCount.get() < nodeCount.get() * EVENTS_PER_NODE)) {
                 long t0 = System.currentTimeMillis();
                 Thread.sleep(OUTPUT_RESOLUTION);
                 t += System.currentTimeMillis() - t0;
@@ -146,9 +114,56 @@ public class ObservationTest extends Benchmark {
                 System.out.format("%7d %7d %7.1f %7d %7.1f %1.2f%n", t, nc, nps, ec, eps, epn);
             }
             createNodes.get();
+            createNodes2.get();
+            createNodes3.get();
         } finally {
-            observationManager.removeEventListener(listener);
+            //observationManager.removeEventListener(listener);
         }
+    }
+
+    private Runnable getTask(final Repository repository, final AtomicInteger nodeCount, final String id) throws RepositoryException {
+        return new Runnable() {
+            private final Session session = repository.login(new SimpleCredentials("admin", "admin".toCharArray()));
+
+            @Override
+            public void run() {
+                try {
+                    Node testRoot = session.getRootNode().addNode("observationBenchmark" + id);
+                    createChildren(testRoot, 100);
+                    for (Node m : JcrUtils.getChildNodes(testRoot)) {
+                        createChildren(m, 100);
+                        for (Node n : JcrUtils.getChildNodes(m)) {
+                            createChildren(n, 5);
+                        }
+                    }
+                    session.save();
+                } catch (RepositoryException e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    session.logout();
+                }
+            }
+
+            private void createChildren(Node node, int count) throws RepositoryException {
+                for (int c = 0; c < count; c++) {
+                    node.addNode("n" + c);
+                    if (nodeCount.incrementAndGet() % SAVE_INTERVAL == 0) {
+                        node.getSession().save();
+                    }
+                }
+            }
+        };
+    }
+
+    private EventListener createListener(final AtomicInteger eventCount) {
+        return new EventListener() {
+            @Override
+            public void onEvent(EventIterator events) {
+                for (; events.hasNext(); events.nextEvent()) {
+                    eventCount.incrementAndGet();
+                }
+            }
+        };
     }
 
 }
