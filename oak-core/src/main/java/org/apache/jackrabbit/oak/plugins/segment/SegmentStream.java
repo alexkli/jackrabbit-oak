@@ -179,11 +179,7 @@ public class SegmentStream extends InputStream {
 
     @Override
     public int available() {
-        if (inline != null) {
-            return (int) (length - position); // <= inline.length
-        } else {
-            return 0;
-        }
+        return (int) (length - position);
     }
 
     @Override
