@@ -23,6 +23,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -302,4 +303,35 @@ public class RecordTest {
         assertEquals(builder.getNodeState(), after);
     }
 
+    @Test
+    public void testBufferedSegmentStream() throws IOException {
+        // test OAK-956, wrapping SegmentStream with a BufferedInputStream
+
+        // create a blob that does not get inlined, i.e. larger than MEDIUM_LIMIT
+        final byte[] source = new byte[Segment.MEDIUM_LIMIT + 1];
+        random.nextBytes(source);
+
+        // and the read size must go across the BLOCK_SIZE boundary
+        final int readSize = SegmentWriter.BLOCK_SIZE + 1;
+
+        Blob value = writer.writeStream(new ByteArrayInputStream(source));
+
+        // make sure BufferedInputStream has a large enough buffer
+        BufferedInputStream bis = new BufferedInputStream(value.getNewStream(), readSize * 2);
+
+        try {
+            byte[] target = new byte[readSize];
+
+            int read = bis.read(target);
+
+            // ensure everything could be read
+            assertEquals(readSize, read);
+
+            for (int i = 0; i < readSize; i++) {
+                assertEquals(source[i], target[i]);
+            }
+        } finally {
+            bis.close();
+        }
+    }
 }
