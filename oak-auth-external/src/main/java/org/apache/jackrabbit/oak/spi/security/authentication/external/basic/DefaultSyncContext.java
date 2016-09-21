@@ -325,11 +325,24 @@ public class DefaultSyncContext implements SyncContext {
         if (authorizable.isGroup() && ((Group) authorizable).getDeclaredMembers().hasNext()) {
             log.info("won't remove local group with members: {}", id);
             status = SyncResult.Status.NOP;
+
         } else if (!keepMissing) {
-            authorizable.remove();
-            log.debug("removing authorizable '{}' that no longer exists on IDP {}", id, idp.getName());
+            if (authorizable instanceof User) {
+                User user = (User) authorizable;
+                if (config.user().getDisableMissing()) {
+                    user.disable("No longer exists on IDP " + idp.getName());
+                    log.debug("disabling user '{}' that no longer exists on IDP {}", id, idp.getName());
+                } else {
+                    user.remove();
+                    log.debug("removing user '{}' that no longer exists on IDP {}", id, idp.getName());
+                }
+            } else {
+                authorizable.remove();
+                log.debug("removing authorizable '{}' that no longer exists on IDP {}", id, idp.getName());
+            }
             timer.mark("remove");
             status = SyncResult.Status.DELETE;
+
         } else {
             status = SyncResult.Status.MISSING;
             log.info("external identity missing for {}, but purge == false.", id);
@@ -469,6 +482,14 @@ public class DefaultSyncContext implements SyncContext {
                                       @Nonnull DefaultSyncConfig.Authorizable config) throws RepositoryException {
         syncProperties(external, authorizable, config.getPropertyMapping());
         applyMembership(authorizable, config.getAutoMembership());
+
+        if (authorizable instanceof User) {
+            User user = (User) authorizable;
+            // ensure users are enabled or re-enabled
+            if (user.isDisabled()) {
+                user.disable(null);
+            }
+        }
     }
 
     /**
