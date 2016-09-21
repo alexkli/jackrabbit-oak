@@ -325,11 +325,27 @@ public class DefaultSyncContext implements SyncContext {
         if (authorizable.isGroup() && ((Group) authorizable).getDeclaredMembers().hasNext()) {
             log.info("won't remove local group with members: {}", id);
             status = SyncResult.Status.NOP;
+
         } else if (!keepMissing) {
-            authorizable.remove();
-            log.debug("removing authorizable '{}' that no longer exists on IDP {}", id, idp.getName());
-            timer.mark("remove");
             status = SyncResult.Status.DELETE;
+
+            if (authorizable instanceof User) {
+                User user = (User) authorizable;
+                if (config.user().getDisableMissing()) {
+                    user.disable("No longer exists on external identity provider '" + idp.getName() + "'");
+                    log.debug("disabling user '{}' that no longer exists on IDP {}", id, idp.getName());
+                    status = SyncResult.Status.DISABLE;
+
+                } else {
+                    user.remove();
+                    log.debug("removing user '{}' that no longer exists on IDP {}", id, idp.getName());
+                }
+            } else {
+                authorizable.remove();
+                log.debug("removing authorizable '{}' that no longer exists on IDP {}", id, idp.getName());
+            }
+            timer.mark("remove");
+
         } else {
             status = SyncResult.Status.MISSING;
             log.info("external identity missing for {}, but purge == false.", id);
@@ -432,9 +448,19 @@ public class DefaultSyncContext implements SyncContext {
                 // synchronize external memberships
                 syncMembership(external, user, config.user().getMembershipNestingDepth());
             }
+
+            status = SyncResult.Status.UPDATE;
+
+            if (this.config.user().getDisableMissing()) {
+                // ensure users get re-enabled
+                if (user.isDisabled()) {
+                    status = SyncResult.Status.ENABLE;
+                    user.disable(null);
+                }
+            }
+
             // finally "touch" the sync property
             user.setProperty(REP_LAST_SYNCED, nowValue);
-            status = SyncResult.Status.UPDATE;
         }
         return new DefaultSyncResultImpl(createSyncedIdentity(user), status);
     }
