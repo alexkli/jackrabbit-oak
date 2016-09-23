@@ -636,6 +636,33 @@ public class DefaultSyncContextTest extends AbstractExternalAuthTest {
         }
     }
 
+    /**
+     * @see <a href="https://issues.apache.org/jira/browse/OAK-4845">OAK-4845</a>
+     */
+    @Test
+    public void testMembershipForExistingLocalGroup() throws Exception {
+        syncConfig.user().setMembershipNestingDepth(1).setMembershipExpirationTime(-1).setExpirationTime(-1);
+        syncConfig.group().setExpirationTime(-1);
+
+        ExternalUser externalUser = idp.getUser(USER_ID);
+        ExternalIdentityRef groupRef = externalUser.getDeclaredGroups().iterator().next();
+
+        // create the group locally (has no rep:externalId)
+        Group gr = userManager.createGroup(groupRef.getId());
+        root.commit();
+
+        sync(externalUser);
+
+        User user = userManager.getAuthorizable(externalUser.getId(), User.class);
+        assertNotNull(user);
+
+        // verify membership gets added
+        assertTrue(gr.isDeclaredMember(user));
+        Iterator<Group> declared = user.declaredMemberOf();
+        assertTrue(declared.hasNext());
+        assertTrue(gr.getID().equals(declared.next().getID()));
+    }
+
     @Test
     public void testGetAuthorizableUser() throws Exception {
         ExternalIdentity extUser = idp.listUsers().next();

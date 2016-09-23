@@ -533,7 +533,7 @@ public class DefaultSyncContext implements SyncContext {
             if (a == null) {
                 grp = createGroup(extGroup);
                 log.debug("- created new group");
-            } else if (a.isGroup() && isSameIDP(a)) {
+            } else if (a.isGroup() && isLocalOrSameIDP(a)) {
                 grp = (Group) a;
             } else {
                 log.warn("Existing authorizable '{}' is not a group from this IDP '{}'.", extGroup.getId(), idp.getName());
@@ -735,6 +735,18 @@ public class DefaultSyncContext implements SyncContext {
     protected boolean isSameIDP(@Nullable Authorizable auth) throws RepositoryException {
         ExternalIdentityRef ref = getIdentityRef(auth);
         return ref != null && idp.getName().equals(ref.getProviderName());
+    }
+
+    /**
+     * Checks if the given authorizable was synced from the same IDP or does not have an external IDP
+     * reference in form of the {@value #REP_EXTERNAL_ID} property.
+     *
+     * @param auth the authorizable.
+     * @return {@code true} if local or same IDP.
+     */
+    protected boolean isLocalOrSameIDP(@Nullable Authorizable auth) throws RepositoryException {
+        ExternalIdentityRef ref = getIdentityRef(auth);
+        return ref == null || idp.getName().equals(ref.getProviderName());
     }
 
     /**
