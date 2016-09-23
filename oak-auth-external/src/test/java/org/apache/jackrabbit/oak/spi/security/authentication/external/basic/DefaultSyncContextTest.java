@@ -539,11 +539,13 @@ public class DefaultSyncContextTest extends AbstractExternalAuthTest {
         // 1. membership nesting is < 0 => membership not synchronized
         syncConfig.user().setMembershipNestingDepth(-1);
         syncCtx.sync(user.getID()).getStatus();
+        root.commit();
         assertTrue(gr.isDeclaredMember(user));
 
         // 2. membership nesting is > 0 => membership gets synchronized
         syncConfig.user().setMembershipNestingDepth(1);
         assertEquals(SyncResult.Status.UPDATE, syncCtx.sync(user.getID()).getStatus());
+        root.commit();
 
         assertFalse(gr.isDeclaredMember(user));
     }
@@ -568,6 +570,7 @@ public class DefaultSyncContextTest extends AbstractExternalAuthTest {
         syncConfig.user().setMembershipNestingDepth(1);
 
         assertEquals(SyncResult.Status.UPDATE, syncCtx.sync(user.getID()).getStatus());
+        root.commit();
 
         // since the group is not associated with the test-IDP the group-membership
         // must NOT be modified during the sync.
@@ -614,8 +617,7 @@ public class DefaultSyncContextTest extends AbstractExternalAuthTest {
         setExternalID(gr, "foreignIDP");  // but don't set rep:lastSynced :-)
         root.commit();
 
-        SyncResult result = syncCtx.sync(externalUser);
-        assertSame(SyncResult.Status.ADD, result.getStatus());
+        sync(externalUser);
 
         User user = userManager.getAuthorizable(externalUser.getId(), User.class);
         assertNotNull(user);
