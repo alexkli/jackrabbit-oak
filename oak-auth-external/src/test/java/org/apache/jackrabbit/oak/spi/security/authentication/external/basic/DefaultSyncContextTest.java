@@ -64,6 +64,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public class DefaultSyncContextTest extends AbstractExternalAuthTest {
 
@@ -634,6 +635,37 @@ public class DefaultSyncContextTest extends AbstractExternalAuthTest {
         while (declared.hasNext()) {
             assertFalse(gr.getID().equals(declared.next().getID()));
         }
+    }
+
+    /**
+     * @see <a href="https://issues.apache.org/jira/browse/OAK-4845">OAK-4845</a>
+     */
+    @Test
+    public void testMembershipForExistingLocalGroup() throws Exception {
+        syncConfig.user().setMembershipNestingDepth(1).setMembershipExpirationTime(-1).setExpirationTime(-1);
+        syncConfig.group().setExpirationTime(-1);
+
+        ExternalUser externalUser = idp.getUser(USER_ID);
+        ExternalIdentityRef groupRef = externalUser.getDeclaredGroups().iterator().next();
+
+        // create the group locally (has no rep:externalId)
+        Group gr = userManager.createGroup(groupRef.getId());
+        root.commit();
+
+        sync(externalUser);
+
+        User user = userManager.getAuthorizable(externalUser.getId(), User.class);
+        assertNotNull(user);
+
+        // verify membership gets added
+        assertTrue(gr.isDeclaredMember(user));
+        Iterator<Group> declared = user.declaredMemberOf();
+        while (declared.hasNext()) {
+            if (gr.getID().equals(declared.next().getID())) {
+                return;
+            }
+        }
+        fail();
     }
 
     @Test
