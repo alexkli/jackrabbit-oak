@@ -198,18 +198,18 @@ class PermissionValidator extends DefaultValidator {
         long toTest = getPermission(tree, defaultPermission);
         if (Permissions.isRepositoryPermission(toTest)) {
             if (!permissionProvider.getRepositoryPermission().isGranted(toTest)) {
-                throw new CommitFailedException(ACCESS, 0, "Access denied");
+                throw new CommitFailedException(ACCESS, 0, "Access denied for " + Permissions.getString(defaultPermission) + " at node " + tree.getPath());
             }
             return null; // no need for further validation down the subtree
         } else {
             NodeState ns = getNodeState(tree);
             if (ns == null) {
-                throw new CommitFailedException(ACCESS, 0, "Access denied");
+                throw new CommitFailedException(ACCESS, 0, "Access denied for " + Permissions.getString(defaultPermission) + " at node " + tree.getPath());
             }
 
             TreePermission tp = parentPermission.getChildPermission(tree.getName(), ns);
             if (!tp.isGranted(toTest)) {
-                throw new CommitFailedException(ACCESS, 0, "Access denied");
+                throw new CommitFailedException(ACCESS, 0, "Access denied for " + Permissions.getString(defaultPermission) + " at node " + tree.getPath());
             }
             if (noTraverse(toTest, defaultPermission)) {
                 return null;
@@ -239,7 +239,7 @@ class PermissionValidator extends DefaultValidator {
             }
 
             if (!isGranted) {
-                throw new CommitFailedException(ACCESS, 0, "Access denied");
+                throw new CommitFailedException(ACCESS, 0, "Access denied for " + Permissions.getString(defaultPermission) + " at property " + parent.getPath() + "/" + property.getName());
             }
         }
     }
