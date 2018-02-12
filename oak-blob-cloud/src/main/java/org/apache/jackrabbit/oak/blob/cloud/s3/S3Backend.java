@@ -21,6 +21,7 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
@@ -29,17 +30,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Queue;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import com.amazonaws.AmazonClientException;
 import com.amazonaws.AmazonServiceException;
+import com.amazonaws.HttpMethod;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.model.CopyObjectRequest;
 import com.amazonaws.services.s3.model.DeleteObjectsRequest;
 import com.amazonaws.services.s3.model.DeleteObjectsResult;
+import com.amazonaws.services.s3.model.GeneratePresignedUrlRequest;
 import com.amazonaws.services.s3.model.ListObjectsRequest;
 import com.amazonaws.services.s3.model.ObjectListing;
 import com.amazonaws.services.s3.model.ObjectMetadata;
@@ -99,6 +103,10 @@ public class S3Backend extends AbstractSharedBackend {
     private Date startTime;
 
     private S3RequestDecorator s3ReqDecorator;
+
+    // 0 = off by default
+    private int presignedPutExpirySeconds = 0;
+    private int presignedGetExpirySeconds = 0;
 
     public void init() throws DataStoreException {
         ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
@@ -164,6 +172,17 @@ public class S3Backend extends AbstractSharedBackend {
             if (renameKeyBool) {
                 renameKeys();
             }
+
+            String putExpiry = properties.getProperty(S3Constants.PRESIGNED_PUT_EXPIRY_SEC);
+            if (putExpiry != null) {
+                setURLWritableBinaryExpirySeconds(Integer.parseInt(putExpiry));
+            }
+
+            String getExpiry = properties.getProperty(S3Constants.PRESIGNED_GET_EXPIRY_SEC);
+            if (getExpiry != null) {
+                setURLReadableBinaryExpirySeconds(Integer.parseInt(getExpiry));
+            }
+
             LOG.debug("S3 Backend initialized in [{}] ms",
                 +(System.currentTimeMillis() - startTime.getTime()));
         } catch (Exception e) {
@@ -572,6 +591,79 @@ public class S3Backend extends AbstractSharedBackend {
             if (contextClassLoader != null) {
                 Thread.currentThread().setContextClassLoader(contextClassLoader);
             }
+        }
+    }
+
+    public void setURLWritableBinaryExpirySeconds(int seconds) {
+        this.presignedPutExpirySeconds = seconds;
+    }
+
+    private static final String SPECIAL_SUFFIX = "_NO_HASH";
+    private static final int MAX_UNIQUE_RECORD_TRIES = 10;
+
+    public DataIdentifier addNewRecord() throws DataStoreException {
+        // in case our random uuid generation fails and hits only existing keys (however unlikely)
+        // try only a limited number of times to avoid endless loop and throw instead
+        for (int i = 0; i < MAX_UNIQUE_RECORD_TRIES; i++) {
+            // a random UUID instead of a content hash
+            final String id = UUID.randomUUID().toString() + SPECIAL_SUFFIX;
+
+            final DataIdentifier identifier = new DataIdentifier(id);
+            if (exists(identifier)) {
+                LOG.info("Newly generated random record id already exists as S3 key [try {} of {}]: {}", id, i, MAX_UNIQUE_RECORD_TRIES);
+                continue;
+            }
+            LOG.info("Created new unique record id: {}", id);
+            return identifier;
+        }
+        throw new DataStoreException("Could not generate a new unique record id in " + MAX_UNIQUE_RECORD_TRIES + " tries");
+    }
+
+    public URL createPresignedPutURL(DataIdentifier identifier) {
+        if (presignedPutExpirySeconds <= 0) {
+            // feature disabled
+            return null;
+        }
+
+        return createPresignedURL(identifier, HttpMethod.PUT, presignedPutExpirySeconds);
+    }
+
+    public void setURLReadableBinaryExpirySeconds(int seconds) {
+        this.presignedGetExpirySeconds = seconds;
+    }
+
+    public URL createPresignedGetURL(DataIdentifier identifier) {
+        if (presignedGetExpirySeconds <= 0) {
+            // feature disabled
+            return null;
+        }
+
+        return createPresignedURL(identifier, HttpMethod.GET, presignedGetExpirySeconds);
+    }
+
+    private URL createPresignedURL(DataIdentifier identifier, HttpMethod method, int expirySeconds) {
+        final String key = getKeyName(identifier);
+
+        try {
+            final Date expiration = new Date();
+            expiration.setTime(expiration.getTime() + expirySeconds * 1000);
+
+            GeneratePresignedUrlRequest request = new GeneratePresignedUrlRequest(bucket, key);
+            request.setMethod(method);
+            request.setExpiration(expiration);
+
+            URL url = s3service.generatePresignedUrl(request);
+
+            LOG.debug("Presigned {} URL for key {}: {}", method.name(), key, url.toString());
+
+            return url;
+
+        } catch (AmazonServiceException e) {
+            LOG.error("AWS request to create presigned S3 {} URL failed. " +
+                    "Key: {}, Error: {}, HTTP Code: {}, AWS Error Code: {}, Error Type: {}, Request ID: {}",
+                method.name(), key, e.getMessage(), e.getStatusCode(), e.getErrorCode(), e.getErrorType(), e.getRequestId());
+
+            return null;
         }
     }
 
