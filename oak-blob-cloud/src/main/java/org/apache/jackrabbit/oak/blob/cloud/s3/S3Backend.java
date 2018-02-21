@@ -40,10 +40,13 @@ import com.amazonaws.AmazonServiceException;
 import com.amazonaws.HttpMethod;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.services.s3.S3ClientOptions;
+import com.amazonaws.services.s3.model.BucketAccelerateConfiguration;
 import com.amazonaws.services.s3.model.CopyObjectRequest;
 import com.amazonaws.services.s3.model.DeleteObjectsRequest;
 import com.amazonaws.services.s3.model.DeleteObjectsResult;
 import com.amazonaws.services.s3.model.GeneratePresignedUrlRequest;
+import com.amazonaws.services.s3.model.GetBucketAccelerateConfigurationRequest;
 import com.amazonaws.services.s3.model.ListObjectsRequest;
 import com.amazonaws.services.s3.model.ObjectListing;
 import com.amazonaws.services.s3.model.ObjectMetadata;
@@ -58,10 +61,13 @@ import com.amazonaws.util.StringUtils;
 import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.base.Strings;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.io.input.NullInputStream;
 import org.apache.jackrabbit.core.data.DataIdentifier;
 import org.apache.jackrabbit.core.data.DataRecord;
 import org.apache.jackrabbit.core.data.DataStoreException;
@@ -90,7 +96,14 @@ public class S3Backend extends AbstractSharedBackend {
 
     private static final String REF_KEY = "reference.key";
 
+    private static final String NEW_RECORD_SUFFIX = "_NO_HASH";
+
+    private static final int MAX_UNIQUE_RECORD_TRIES = 10;
+
     private AmazonS3Client s3service;
+
+    // needed only in case of transfer acceleration is enabled for presigned URLs
+    private AmazonS3Client s3PresignService;
 
     private String bucket;
 
@@ -103,6 +116,8 @@ public class S3Backend extends AbstractSharedBackend {
     private Date startTime;
 
     private S3RequestDecorator s3ReqDecorator;
+
+    private Cache<DataIdentifier, URL> presignedGetURLCache;
 
     // 0 = off by default
     private int presignedPutExpirySeconds = 0;
@@ -119,6 +134,8 @@ public class S3Backend extends AbstractSharedBackend {
 
             s3ReqDecorator = new S3RequestDecorator(properties);
             s3service = Utils.openService(properties);
+            s3PresignService = s3service;
+
             if (bucket == null || "".equals(bucket.trim())) {
                 bucket = properties.getProperty(S3Constants.S3_BUCKET);
                 // Alternately check if the 'container' property is set
@@ -173,6 +190,8 @@ public class S3Backend extends AbstractSharedBackend {
                 renameKeys();
             }
 
+            // settings around pre-signing
+
             String putExpiry = properties.getProperty(S3Constants.PRESIGNED_PUT_EXPIRY_SEC);
             if (putExpiry != null) {
                 setURLWritableBinaryExpirySeconds(Integer.parseInt(putExpiry));
@@ -180,8 +199,20 @@ public class S3Backend extends AbstractSharedBackend {
 
             String getExpiry = properties.getProperty(S3Constants.PRESIGNED_GET_EXPIRY_SEC);
             if (getExpiry != null) {
-                setURLReadableBinaryExpirySeconds(Integer.parseInt(getExpiry));
+                final int getExpirySeconds = Integer.parseInt(getExpiry);
+                setURLReadableBinaryExpirySeconds(getExpirySeconds);
+
+                int cacheMaxSize = 0; // off by default
+                String cacheMaxSizeStr = properties.getProperty(S3Constants.PRESIGNED_GET_URL_CACHE_MAX_SIZE);
+                if (cacheMaxSizeStr != null) {
+                    cacheMaxSize = Integer.parseInt(cacheMaxSizeStr);
+                }
+
+                setURLReadableBinaryURLCacheSize(cacheMaxSize);
             }
+
+            String enablePresignedAccelerationStr = properties.getProperty(S3Constants.PRESIGNED_URL_ENABLE_ACCELERATION);
+            setURLBinaryTransferAcceleration(enablePresignedAccelerationStr != null && "true".equals(enablePresignedAccelerationStr));
 
             LOG.debug("S3 Backend initialized in [{}] ms",
                 +(System.currentTimeMillis() - startTime.getTime()));
@@ -201,6 +232,27 @@ public class S3Backend extends AbstractSharedBackend {
             if (contextClassLoader != null) {
                 Thread.currentThread().setContextClassLoader(contextClassLoader);
             }
+        }
+    }
+
+    public void setURLBinaryTransferAcceleration(boolean enabled) {
+        if (enabled) {
+            // verify acceleration is enabled on the bucket
+            BucketAccelerateConfiguration accelerateConfig = s3service.getBucketAccelerateConfiguration(new GetBucketAccelerateConfigurationRequest(bucket));
+            if (accelerateConfig.isAccelerateEnabled()) {
+                // If transfer acceleration is enabled for presigned urls, we need a separate AmazonS3Client
+                // instance with the acceleration mode enabled, because we don't want the requests from the
+                // data store itself to S3 to use acceleration
+                s3PresignService = Utils.openService(properties);
+                s3PresignService.setS3ClientOptions(S3ClientOptions.builder().setAccelerateModeEnabled(true).build());
+                LOG.info("S3 Transfer Acceleration enabled for presigned URLs.");
+
+            } else {
+                LOG.warn("S3 Transfer Acceleration is not enabled on the bucket {}. Will create normal, non-accelerated presigned URLs.",
+                    bucket, S3Constants.PRESIGNED_URL_ENABLE_ACCELERATION);
+            }
+        } else {
+            s3PresignService = s3service;
         }
     }
 
@@ -534,9 +586,15 @@ public class S3Backend extends AbstractSharedBackend {
             return record;
         } catch (AmazonServiceException e) {
             if (e.getStatusCode() == 404 || e.getStatusCode() == 403) {
-                LOG.info(
-                    "getRecord:Identifier [{}] not found. Took [{}] ms.",
-                    identifier, (System.currentTimeMillis() - start));
+                if (key.endsWith(NEW_RECORD_SUFFIX)) {
+                    // present as empty
+                    LOG.debug("new URLWritableBlob not uploaded yet", e);
+                    return new EmptyRecord(identifier);
+                } else {
+                    LOG.info(
+                        "getRecord:Identifier [{}] not found. Took [{}] ms.",
+                        identifier, (System.currentTimeMillis() - start));
+                }
             }
             throw new DataStoreException(e);
         } finally {
@@ -598,15 +656,12 @@ public class S3Backend extends AbstractSharedBackend {
         this.presignedPutExpirySeconds = seconds;
     }
 
-    private static final String SPECIAL_SUFFIX = "_NO_HASH";
-    private static final int MAX_UNIQUE_RECORD_TRIES = 10;
-
     public DataIdentifier addNewRecord() throws DataStoreException {
         // in case our random uuid generation fails and hits only existing keys (however unlikely)
         // try only a limited number of times to avoid endless loop and throw instead
         for (int i = 0; i < MAX_UNIQUE_RECORD_TRIES; i++) {
             // a random UUID instead of a content hash
-            final String id = UUID.randomUUID().toString() + SPECIAL_SUFFIX;
+            final String id = UUID.randomUUID().toString() + NEW_RECORD_SUFFIX;
 
             final DataIdentifier identifier = new DataIdentifier(id);
             if (exists(identifier)) {
@@ -632,13 +687,39 @@ public class S3Backend extends AbstractSharedBackend {
         this.presignedGetExpirySeconds = seconds;
     }
 
+    public void setURLReadableBinaryURLCacheSize(int maxSize) {
+        // max size 0 or smaller is used to turn off the cache
+        if (maxSize > 0) {
+            LOG.info("presigned GET URL cache enabled, maxSize = {} items, expiry = {} seconds", maxSize, presignedGetExpirySeconds / 2);
+            presignedGetURLCache = CacheBuilder.newBuilder()
+                .maximumSize(maxSize)
+                // cache for half the expiry time of the urls before giving out new ones
+                .expireAfterWrite(presignedGetExpirySeconds / 2, TimeUnit.SECONDS)
+                .build();
+        } else {
+            LOG.info("presigned GET URL cache disabled");
+            presignedGetURLCache = null;
+        }
+    }
+
     public URL createPresignedGetURL(DataIdentifier identifier) {
         if (presignedGetExpirySeconds <= 0) {
             // feature disabled
             return null;
         }
 
-        return createPresignedURL(identifier, HttpMethod.GET, presignedGetExpirySeconds);
+        URL url = null;
+        // if cache is enabled, check the cache
+        if (presignedGetURLCache != null) {
+            url = presignedGetURLCache.getIfPresent(identifier);
+        }
+        if (url == null) {
+            url = createPresignedURL(identifier, HttpMethod.GET, presignedGetExpirySeconds);
+            if (url != null && presignedGetURLCache != null) {
+                presignedGetURLCache.put(identifier, url);
+            }
+        }
+        return url;
     }
 
     private URL createPresignedURL(DataIdentifier identifier, HttpMethod method, int expirySeconds) {
@@ -652,7 +733,7 @@ public class S3Backend extends AbstractSharedBackend {
             request.setMethod(method);
             request.setExpiration(expiration);
 
-            URL url = s3service.generatePresignedUrl(request);
+            URL url = s3PresignService.generatePresignedUrl(request);
 
             LOG.debug("Presigned {} URL for key {}: {}", method.name(), key, url.toString());
 
@@ -955,6 +1036,54 @@ public class S3Backend extends AbstractSharedBackend {
 
         public KeyRenameThread(String oldKey) {
             this.oldKey = oldKey;
+        }
+    }
+
+    private class EmptyRecord implements DataRecord {
+
+        private final DataIdentifier identifier;
+
+        public EmptyRecord(DataIdentifier identifier) {
+            this.identifier = identifier;
+        }
+
+        @Override
+        public DataIdentifier getIdentifier() {
+            return identifier;
+        }
+
+        @Override
+        public String getReference() {
+            return null;
+        }
+
+        @Override
+        public long getLength() throws DataStoreException {
+            return 0;
+        }
+
+        @Override
+        public InputStream getStream() throws DataStoreException {
+            // return empty stream
+            return new NullInputStream(0);
+        }
+
+        @Override
+        public long getLastModified() {
+            return 0;
+        }
+
+        public String toString() {
+            return identifier.toString();
+        }
+
+        public boolean equals(Object object) {
+            return (object instanceof DataRecord)
+                && identifier.equals(((DataRecord) object).getIdentifier());
+        }
+
+        public int hashCode() {
+            return identifier.hashCode();
         }
     }
 }
